@@ -11,6 +11,7 @@ import urllib.parse
 import binascii # Base64 에러 처리를 위해 import
 import subprocess
 import time
+import hashlib
 
 
 # 로깅 설정
@@ -47,6 +48,52 @@ except Exception as e:
 
 server_address = os.getenv('SERVER_ADDRESS', '127.0.0.1')
 client_id = str(uuid.uuid4())
+
+# ------------------------------
+# R2 / S3 결과 업로드 (선택)
+# 아래 환경변수가 모두 설정되면 결과 PNG를 R2(S3 호환)에 업로드하고
+# 공개 URL("image_url")을 반환합니다. 미설정 시 기존처럼 base64("image")로 반환합니다.
+#   R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_PUBLIC_BASE
+#   (선택) R2_PREFIX  기본값 "edits"
+# 키는 결과 바이트의 sha256 → 동일 결과는 같은 키로 재사용(자연 캐시).
+# ------------------------------
+R2_ENDPOINT = os.environ.get("R2_ENDPOINT")
+R2_BUCKET = os.environ.get("R2_BUCKET")
+R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY_ID")
+R2_SECRET_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
+R2_PUBLIC_BASE = os.environ.get("R2_PUBLIC_BASE")
+R2_PREFIX = os.environ.get("R2_PREFIX", "edits")
+_s3_client = None
+
+def r2_enabled():
+    return all([R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY, R2_SECRET_KEY, R2_PUBLIC_BASE])
+
+def _get_s3():
+    global _s3_client
+    if _s3_client is None:
+        import boto3
+        from botocore.config import Config
+        _s3_client = boto3.client(
+            "s3", endpoint_url=R2_ENDPOINT,
+            aws_access_key_id=R2_ACCESS_KEY, aws_secret_access_key=R2_SECRET_KEY,
+            region_name="auto",
+            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        )
+    return _s3_client
+
+def upload_to_r2(image_bytes, ext="png", content_type="image/png"):
+    """결과 이미지를 R2에 업로드하고 공개 URL을 반환."""
+    digest = hashlib.sha256(image_bytes).hexdigest()
+    key = f"{R2_PREFIX.strip('/')}/{digest}.{ext}"
+    _get_s3().put_object(
+        Bucket=R2_BUCKET, Key=key, Body=image_bytes,
+        ContentType=content_type,
+        CacheControl="public, max-age=31536000, immutable",
+    )
+    url = f"{R2_PUBLIC_BASE.rstrip('/')}/{key}"
+    logger.info(f"✅ R2 업로드 완료: {url} ({len(image_bytes)} bytes)")
+    return url
+
 def save_data_if_base64(data_input, temp_dir, output_filename):
     """
     입력 데이터가 Base64 문자열인지 확인하고, 맞다면 파일로 저장 후 경로를 반환합니다.
@@ -119,11 +166,8 @@ def get_images(ws, prompt):
         images_output = []
         if 'images' in node_output:
             for image in node_output['images']:
+                # 원본 bytes 그대로 보관 (R2 업로드/ base64 인코딩은 핸들러에서 결정)
                 image_data = get_image(image['filename'], image['subfolder'], image['type'])
-                # bytes 객체를 base64로 인코딩하여 JSON 직렬화 가능하게 변환
-                if isinstance(image_data, bytes):
-                    import base64
-                    image_data = base64.b64encode(image_data).decode('utf-8')
                 images_output.append(image_data)
         output_images[node_id] = images_output
 
@@ -264,6 +308,19 @@ def handler(job):
     if _NODE_HEIGHT in prompt and "height" in job_input:
         prompt[_NODE_HEIGHT]["inputs"]["value"] = job_input["height"]
 
+    # 출력 해상도(메가픽셀) 조정 — 요청별 megapixels 또는 MEGAPIXELS 환경변수.
+    # 미설정 시 워크플로우 기본값(1MP) 유지. 낮추면 속도↑·용량↓ (품질 trade-off).
+    mp = job_input.get("megapixels", os.environ.get("MEGAPIXELS"))
+    if mp:
+        try:
+            mp_val = float(mp)
+            for node in prompt.values():
+                if isinstance(node, dict) and node.get("class_type") == "ImageScaleToTotalPixels":
+                    node["inputs"]["megapixels"] = mp_val
+            logger.info(f"🖼️ megapixels override → {mp_val}")
+        except (TypeError, ValueError):
+            logger.warning(f"잘못된 megapixels 값 무시: {mp}")
+
     ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
     logger.info(f"Connecting to WebSocket: {ws_url}")
     
@@ -305,11 +362,17 @@ def handler(job):
     if not images:
         return {"error": "이미지를 생성할 수 없습니다."}
     
-    # 첫 번째 이미지 반환
+    # 첫 번째 이미지 반환 — R2 설정 시 업로드 후 URL, 아니면 base64
     for node_id in images:
         if images[node_id]:
-            return {"image": images[node_id][0]}
-    
+            image_bytes = images[node_id][0]
+            if r2_enabled():
+                try:
+                    return {"image_url": upload_to_r2(image_bytes)}
+                except Exception as e:
+                    logger.error(f"❌ R2 업로드 실패, base64로 폴백: {e}")
+            return {"image": base64.b64encode(image_bytes).decode("utf-8")}
+
     return {"error": "이미지를 찾을 수 없습니다."}
 
 runpod.serverless.start({"handler": handler})

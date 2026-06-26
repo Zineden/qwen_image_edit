@@ -62,8 +62,9 @@ fi
 echo "Using CUDA device: $CUDA_VISIBLE_DEVICES"
 
 # Start ComfyUI in the background
+# --highvram: ADA 24/32GB에 모델을 상주시켜 요청 간 재로딩 제거 (warm 지연 일정화)
 echo "Starting ComfyUI in the background..."
-python /ComfyUI/main.py --listen --use-sage-attention &
+python /ComfyUI/main.py --listen --use-sage-attention --highvram &
 
 # Wait for ComfyUI to be ready
 echo "Waiting for ComfyUI to be ready..."
@@ -83,6 +84,11 @@ if [ $wait_count -ge $max_wait ]; then
     echo "Error: ComfyUI failed to start within $max_wait seconds"
     exit 1
 fi
+
+# 모델 워밍업 — 첫 실제 요청에서 일어나던 콜드 모델 로딩을 부팅 시점으로 이동.
+# FlashBoot/active worker와 함께 쓰면 첫 요청 지연이 크게 줄어듭니다. (실패해도 비치명적)
+echo "Warming up models (preloading into VRAM)..."
+python /warmup.py || echo "⚠️ Warmup skipped/failed (non-fatal)"
 
 # Start the handler in the foreground
 # 이 스크립트가 컨테이너의 메인 프로세스가 됩니다.

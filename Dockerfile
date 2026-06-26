@@ -5,7 +5,8 @@ FROM wlsdml1114/multitalk-base:1.7 as runtime
 RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
 
 RUN pip install -U "huggingface_hub[hf_transfer]"
-RUN pip install runpod websocket-client librosa
+# boto3: 결과 이미지를 R2(S3 호환)에 직접 업로드하기 위함
+RUN pip install runpod websocket-client librosa boto3
 
 # Set working directory
 WORKDIR /
@@ -14,11 +15,8 @@ RUN git clone https://github.com/comfyanonymous/ComfyUI.git && \
     cd ComfyUI && \
     pip install --no-cache-dir -r requirements.txt
 
-RUN cd /ComfyUI/custom_nodes/ && \
-    git clone https://github.com/ltdrdata/ComfyUI-Manager.git && \
-    cd ComfyUI-Manager && \
-    pip install --no-cache-dir -r requirements.txt
-
+# ComfyUI-Manager 제거: 런타임에는 불필요한 개발용 노드(부팅·이미지 크기만 키움).
+# 워크플로우가 쓰는 커스텀 노드는 KJNodes 뿐이므로 그것만 설치한다.
 RUN cd /ComfyUI/custom_nodes/ && \
     git clone https://github.com/kijai/ComfyUI-KJNodes && \
     cd ComfyUI-KJNodes && \
