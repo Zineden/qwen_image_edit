@@ -62,9 +62,11 @@ fi
 echo "Using CUDA device: $CUDA_VISIBLE_DEVICES"
 
 # Start ComfyUI in the background
-# --highvram: ADA 24/32GB에 모델을 상주시켜 요청 간 재로딩 제거 (warm 지연 일정화)
+# 참고: --highvram 는 쓰지 않음 — fp8 diffusion(~20GB)+텍스트인코더(~8GB)가
+# ADA_24(24GB)를 초과해 OOM 위험. ComfyUI 기본 메모리 관리가 워밍업 후
+# 모델을 상주시키므로 warm 요청은 이미 빠름.
 echo "Starting ComfyUI in the background..."
-python /ComfyUI/main.py --listen --use-sage-attention --highvram &
+python /ComfyUI/main.py --listen --use-sage-attention &
 
 # Wait for ComfyUI to be ready
 echo "Waiting for ComfyUI to be ready..."
